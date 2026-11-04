@@ -3,6 +3,7 @@ package players.rhea;
 import core.AbstractGameState;
 import core.interfaces.IStateHeuristic;
 import evaluation.optimisation.TunableParameters;
+import games.sushigo.SGHeuristic;               // CHANGE 3: new import
 import org.json.simple.JSONObject;
 import players.PlayerParameters;
 
@@ -21,7 +22,9 @@ public class RHEAParams extends PlayerParameters
     public int tournamentSize = 4;
     public RHEAEnums.CrossoverType crossoverType = RHEAEnums.CrossoverType.UNIFORM;
     public boolean shiftLeft;
-    public IStateHeuristic heuristic = AbstractGameState::getGameScore;
+    // CHANGE 3 (field): was  = AbstractGameState::getGameScore;
+    public IStateHeuristic heuristic = new SGHeuristic();
+    //public IStateHeuristic heuristic = AbstractGameState::getGameScore;
     public boolean useMAST;
 
 
@@ -36,7 +39,10 @@ public class RHEAParams extends PlayerParameters
         addTunableParameter("crossoverType", RHEAEnums.CrossoverType.UNIFORM, Arrays.asList(RHEAEnums.CrossoverType.values()));
         addTunableParameter("shiftLeft", false, Arrays.asList(false, true));
         addTunableParameter("mutationCount", 1, Arrays.asList(1, 3, 10));
-        addTunableParameter("heuristic", (IStateHeuristic) AbstractGameState::getGameScore);
+        // CHANGE 3 (constructor): this is the line that matters, because _reset() overwrites the field
+        // with this value. Was  (IStateHeuristic) AbstractGameState::getGameScore
+        addTunableParameter("heuristic", (IStateHeuristic) new SGHeuristic());
+        //addTunableParameter("heuristic", (IStateHeuristic) AbstractGameState::getGameScore);
         addTunableParameter("useMAST", false, Arrays.asList(false, true));
     }
 

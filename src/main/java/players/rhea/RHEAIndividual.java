@@ -4,13 +4,21 @@ import core.AbstractForwardModel;
 import core.AbstractGameState;
 import core.AbstractPlayer;
 import core.actions.AbstractAction;
+import core.components.Counter;                 // CHANGE 4: new import (opponent model)
 import core.interfaces.IStateHeuristic;
+import games.sushigo.SGGameState;               // CHANGE 4: new import (opponent model)
+import games.sushigo.actions.ChooseCard;        // CHANGE 4: new import (opponent model)
+import games.sushigo.cards.SGCard;              // CHANGE 4: new import (opponent model)
 import utilities.Pair;
 
 import java.util.List;
 import java.util.Random;
 
 public class RHEAIndividual implements Comparable<RHEAIndividual> {
+
+    // CHANGE 4: probability that an opponent move comes from the card-count model instead of
+    // being uniformly random. Set to 0.0 to switch the model off (for A/B testing).
+    static double MODEL_PROB = 0.5;
 
     protected int repairCount;
     protected int nonRepairCount;
@@ -104,12 +112,11 @@ public class RHEAIndividual implements Comparable<RHEAIndividual> {
         double previousScore = 0;
         int fmCalls = 0, copyCalls = 0;
         AbstractGameState gs = gameStates[startIndex].copy();
+        copyCalls++; // this first copy is counted here (see CHANGE 2 below)
 
-        // This lot are a local record for use in debugging; Very useful, with no compute overhead for keeping a local copy
-        AbstractGameState[] oldGameStates = new AbstractGameState[gameStates.length];
-        List<AbstractAction>[] availableActions = new List[gameStates.length];
-        AbstractAction[] oldActions = new AbstractAction[actions.length];
-        boolean[] illegalActions = new boolean[actions.length];
+        // CHANGE 1: the four debug arrays (oldGameStates, availableActions, oldActions, illegalActions)
+        // that were allocated here have been DELETED. Nothing read them, but allocating them on every
+        // rollout cost time. Delete the lines that wrote to them further down as well.
 
         for (int i = 0; i < startIndex; i++) {
             double score;
@@ -126,14 +133,21 @@ public class RHEAIndividual implements Comparable<RHEAIndividual> {
             if (gs.isNotTerminal()) {
                 // is the action valid
                 AbstractAction action;
-                AbstractGameState gsCopy = gs.copy();
-                copyCalls++;
+
+                // CHANGE 2: at i == startIndex, gs is already a fresh copy made at the top of this
+                // method, so it can be used directly. We only copy for later steps, because the state
+                // stored in gameStates[i] must not be modified. This saves one full state copy per rollout.
+                AbstractGameState gsCopy;
+                if (i == startIndex) {
+                    gsCopy = gs;
+                } else {
+                    gsCopy = gs.copy();
+                    copyCalls++;
+                }
+
                 List<AbstractAction> currentActions = fm.computeAvailableActions(gsCopy, rolloutPolicy.getParameters().actionSpace);
-                availableActions[i] = currentActions;
                 boolean illegalAction = !currentActions.contains(actions[i]);
-                illegalActions[i] = illegalAction;
                 if (illegalAction || actions[i] == null) {
-                    oldActions[i] = actions[i];
                     action = rolloutPolicy.getAction(gsCopy, currentActions);
                     if (repair || actions[i] == null) // if we are repairing then we override an illegal action with a random legitimate one
                         actions[i] = action;
@@ -150,16 +164,15 @@ public class RHEAIndividual implements Comparable<RHEAIndividual> {
 
                 // If it's my turn, store this in the individual
                 while (gsCopy.isNotTerminal() && !(gsCopy.getCurrentPlayer() == playerID)) {
-                    // now we fast forward through any opponent moves with a random OM
-                    // TODO: Add in other opponent model options, and record other player moves for MAST
+                    // now we fast forward through any opponent moves
                     List<AbstractAction> moves = fm.computeAvailableActions(gsCopy);
                     if (moves.isEmpty()) {
                         throw new AssertionError("No moves found in state " + gsCopy);
                     }
-                    fm.next(gsCopy, moves.get(gen.nextInt(moves.size())));
+                    // CHANGE 4: was  fm.next(gsCopy, moves.get(gen.nextInt(moves.size())));
+                    fm.next(gsCopy, pickOpponentMove(gsCopy, moves));
                     fmCalls++;
                 }
-                oldGameStates[i+1] = gameStates[i+1];
                 gameStates[i + 1] = gsCopy;
                 // Individual length increased
                 length++;
@@ -178,9 +191,37 @@ public class RHEAIndividual implements Comparable<RHEAIndividual> {
                 break;
             }
         }
-//        this.value = gs.getScore(playerID);
         this.value = delta;
         return new Pair<>(fmCalls, copyCalls);
+    }
+
+    /**
+     * CHANGE 4 (new method): chooses a move for an opponent during a rollout.
+     * With probability MODEL_PROB the move is sampled with weight 1 + (number of cards of that type
+     * this opponent has already played in the game). Otherwise (or for non-Sushi-Go states) it is
+     * uniformly random, as before.
+     */
+    private AbstractAction pickOpponentMove(AbstractGameState gs, List<AbstractAction> moves) {
+        if (!(gs instanceof SGGameState sg) || gen.nextDouble() >= MODEL_PROB)
+            return moves.get(gen.nextInt(moves.size()));
+
+        double[] w = new double[moves.size()];
+        double total = 0;
+        for (int i = 0; i < moves.size(); i++) {
+            double weight = 1.0; // every card keeps some chance of being picked
+            if (moves.get(i) instanceof ChooseCard cc && cc.getCard(gs) instanceof SGCard card) {
+                Counter played = sg.getPlayedCardTypesAllGame()[cc.playerId].get(card.type);
+                if (played != null) weight += played.getValue();
+            }
+            w[i] = weight;
+            total += weight;
+        }
+        double r = gen.nextDouble() * total;
+        for (int i = 0; i < w.length; i++) {
+            r -= w[i];
+            if (r <= 0) return moves.get(i);
+        }
+        return moves.get(moves.size() - 1);
     }
 
     @Override

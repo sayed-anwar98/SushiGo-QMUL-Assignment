@@ -1,0 +1,9 @@
+{
+  "game": "SushiGo",
+  "nPlayers": 4,
+  "playerDirectory": "json/players/sushigo",
+  "mode": "exhaustive",
+  "matchups": 150,
+  "destDir": "outputDest/Result_sushigo_1000",
+  "listener": "json/listeners/basiclistener.json"
+}

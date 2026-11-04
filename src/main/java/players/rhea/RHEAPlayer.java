@@ -3,6 +3,7 @@ package players.rhea;
 import core.AbstractGameState;
 import core.AbstractPlayer;
 import core.actions.AbstractAction;
+import games.sushigo.SGGameState;               // CHANGE 5: new import (phase switch)
 import players.IAnyTimePlayer;
 import players.PlayerConstants;
 import players.mcts.MASTPlayer;
@@ -16,6 +17,14 @@ import java.util.stream.Collectors;
 
 public class RHEAPlayer extends AbstractPlayer implements IAnyTimePlayer {
     private static final AbstractPlayer randomPlayer = new RandomPlayer();
+
+    // CHANGE 6: settings for re-evaluating the best individuals before choosing a move.
+    // Set FINAL_REPS to 0 to switch this off.
+    // NOTE: this runs AFTER the evolution loop, so set "breakMS" in the RHEA JSON to leave time for it
+    // (e.g. 10-20 ms at a 40 ms budget, more at 200/500 ms). The loop below also stops if time runs out.
+    static int FINALISTS = 3;   // how many of the top individuals to re-evaluate
+    static int FINAL_REPS = 5;  // extra evaluations per finalist
+
     List<Map<Object, Pair<Integer, Double>>> MASTStatistics; // a list of one Map per player. Action -> (visits, totValue)
     protected List<RHEAIndividual> population = new ArrayList<>();
     // Budgets
@@ -71,6 +80,24 @@ public class RHEAPlayer extends AbstractPlayer implements IAnyTimePlayer {
             mastPlayer = new MASTPlayer(null, 1.0, 0.0, System.currentTimeMillis(), 0.0);
             mastPlayer.setMASTStats(MASTStatistics);
         }
+
+        // CHANGE 5: two-phase settings for Sushi Go!.
+        // While some opponents' hands are still hidden we use the configured horizon and discount.
+        // Once every opponent's hand is known, plan the whole rest of the round (horizon = cards left in
+        // our hand) and weight all steps equally (discount 1.0).
+        // This only applies in the "else" branch below (shiftLeft = false, the default in your JSON).
+        int horizonNow = params.horizon;
+        double discountNow = params.discountFactor;
+        if (stateObs instanceof SGGameState sg) {
+            boolean allKnown = true;
+            for (int p = 0; p < sg.getNPlayers(); p++)
+                if (p != getPlayerID() && !sg.isHandKnown(getPlayerID(), p)) allKnown = false;
+            if (allKnown) {
+                horizonNow = Math.max(1, sg.getPlayerHands().get(getPlayerID()).getSize());
+                discountNow = 1.0;
+            }
+        }
+
         // Initialise individuals
         if (params.shiftLeft && !population.isEmpty()) {
             population.forEach(i -> i.value = Double.NEGATIVE_INFINITY);  // so that any we don't have time to shift are ignored when picking an action
@@ -87,7 +114,8 @@ public class RHEAPlayer extends AbstractPlayer implements IAnyTimePlayer {
             population = new ArrayList<>();
             for (int i = 0; i < params.populationSize; ++i) {
                 if (!budgetLeft(timer)) break;
-                population.add(new RHEAIndividual(params.horizon, params.discountFactor, getForwardModel(), stateObs,
+                // CHANGE 5: horizonNow / discountNow replace params.horizon / params.discountFactor here
+                population.add(new RHEAIndividual(horizonNow, discountNow, getForwardModel(), stateObs,
                         getPlayerID(), rnd, params.heuristic, params.useMAST ? mastPlayer : randomPlayer));
                 fmCalls += population.get(i).length;
                 copyCalls += population.get(i).length;
@@ -103,8 +131,38 @@ public class RHEAPlayer extends AbstractPlayer implements IAnyTimePlayer {
 
         timeTaken = timer.elapsedMillis();
         timePerIteration = numIters == 0 ? 0.0 : (timeTaken - initTime) / numIters;
-        // Return first action of best individual
-        AbstractAction retValue = population.get(0).actions[0];
+
+        // CHANGE 6: instead of returning the first action of population.get(0) straight away
+        // (it may simply have been lucky in one noisy rollout), re-evaluate the top few individuals
+        // several times and pick the one with the best average value.
+        RHEAIndividual chosen = population.get(0);
+        if (FINAL_REPS > 0) {
+            int candidates = Math.min(FINALISTS, population.size());
+            double bestMean = Double.NEGATIVE_INFINITY;
+            for (int c = 0; c < candidates; c++) {
+                RHEAIndividual ind = population.get(c);
+                if (ind.length == 0) continue; // nothing to re-simulate
+                double sum = ind.value;
+                int n = 1;
+                for (int r = 0; r < FINAL_REPS; r++) {
+                    if (timer.remainingTimeMillis() <= 0) break; // never run past the budget
+                    RHEAIndividual re = new RHEAIndividual(ind);
+                    Pair<Integer, Integer> calls = re.rollout(getForwardModel(), 0, getPlayerID(), true);
+                    fmCalls += calls.a;
+                    copyCalls += calls.b;
+                    sum += re.value;
+                    n++;
+                }
+                double mean = sum / n;
+                if (mean > bestMean) {
+                    bestMean = mean;
+                    chosen = ind;
+                }
+            }
+        }
+
+        // Return first action of the chosen individual (CHANGE 6: was population.get(0).actions[0])
+        AbstractAction retValue = chosen.actions[0];
         List<AbstractAction> actions = getForwardModel().computeAvailableActions(stateObs, params.actionSpace);
         if (!actions.contains(retValue))
             throw new AssertionError("Action chosen is not legitimate " + numIters + ", " + params.shiftLeft);
